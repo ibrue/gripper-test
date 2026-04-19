@@ -26,13 +26,17 @@ PROTOCOL_VERSION = 2.0
 
 # XL330-M288 / X-series Protocol 2.0 control table.
 ADDR_OPERATING_MODE = 11
+ADDR_SHUTDOWN = 63
 ADDR_TORQUE_ENABLE = 64
 ADDR_GOAL_POSITION = 116
 ADDR_PRESENT_CURRENT = 126
 ADDR_PRESENT_POSITION = 132
+ADDR_PRESENT_TEMPERATURE = 146
 
 LEN_GOAL_POSITION = 4
-LEN_STATE_BLOCK = 10  # current(2) + velocity(4) + position(4) starting at 126
+LEN_STATE_BLOCK = 21  # 126..146 inclusive: current + velocity + position + ... + temp
+
+SHUTDOWN_OVERLOAD_BIT = 0x20  # bit 5: Overload Error
 
 OP_POSITION = 3
 
@@ -65,6 +69,7 @@ def signed(value: int, bits: int) -> int:
 class ServoState:
     position: int
     current_ma: float
+    temperature_c: int
 
 
 class Gripper:
@@ -163,11 +168,33 @@ class Gripper:
         for sid in (self.id_a, self.id_b):
             cur_raw = self.sync_read.getData(sid, ADDR_PRESENT_CURRENT, 2)
             pos_raw = self.sync_read.getData(sid, ADDR_PRESENT_POSITION, 4)
+            temp = self.sync_read.getData(sid, ADDR_PRESENT_TEMPERATURE, 1)
             out[sid] = ServoState(
                 position=signed(pos_raw, 32),
                 current_ma=signed(cur_raw, 16) * CURRENT_LSB_MA,
+                temperature_c=temp,
             )
         return out
+
+    def set_overload_protection(self, enabled: bool) -> None:
+        """Toggle the Overload bit in the Shutdown register (EEPROM)."""
+        for sid in (self.id_a, self.id_b):
+            val, rc, err = self.packet.read1ByteTxRx(self.port, sid, ADDR_SHUTDOWN)
+            if rc != COMM_SUCCESS or err != 0:
+                raise RuntimeError(
+                    f"read shutdown ID {sid}: {self.packet.getTxRxResult(rc)}"
+                )
+            new = (val | SHUTDOWN_OVERLOAD_BIT) if enabled else (val & ~SHUTDOWN_OVERLOAD_BIT)
+            if new == val:
+                continue
+            self._write1(sid, ADDR_TORQUE_ENABLE, 0)
+            self._write1(sid, ADDR_SHUTDOWN, new)
+            self._write1(sid, ADDR_TORQUE_ENABLE, 1)
+
+    def reboot(self) -> None:
+        """Clear hardware-error shutdowns without power-cycling."""
+        for sid in (self.id_a, self.id_b):
+            self.packet.reboot(self.port, sid)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -358,8 +385,19 @@ def cmd_gui(args: argparse.Namespace) -> int:
     torque_cb = ttk.Checkbutton(ctrl, text="Torque", variable=torque_var)
     torque_cb.grid(row=1, column=3, columnspan=2, padx=10)
 
+    fs = ttk.LabelFrame(root, text="Failsafe", padding=10)
+    fs.grid(row=2, column=0, sticky="ew", padx=10, pady=8)
+    overload_var = tk.BooleanVar(value=True)
+    overload_cb = ttk.Checkbutton(
+        fs, text="Overload protection (uncheck to stop auto-shutdown on hard grips)",
+        variable=overload_var,
+    )
+    overload_cb.grid(row=0, column=0, sticky="w")
+    reboot_btn = ttk.Button(fs, text="Reboot servos (clear error)")
+    reboot_btn.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
     status = ttk.LabelFrame(root, text="Status", padding=10)
-    status.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 12))
+    status.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 12))
     mono = ("Menlo", 12)
     status_a = ttk.Label(status, text="Servo A:  —", font=mono)
     status_a.grid(row=0, column=0, sticky="w")
@@ -380,11 +418,13 @@ def cmd_gui(args: argparse.Namespace) -> int:
             a, b = s[g.id_a], s[g.id_b]
             status_a.config(
                 text=f"Servo A:  pos={a.position:>5}  "
-                f"({a.position * TICK_TO_DEG:6.1f}°)  I={a.current_ma:+6.0f} mA"
+                f"({a.position * TICK_TO_DEG:6.1f}°)  "
+                f"I={a.current_ma:+6.0f} mA  T={a.temperature_c:>3}°C"
             )
             status_b.config(
                 text=f"Servo B:  pos={b.position:>5}  "
-                f"({b.position * TICK_TO_DEG:6.1f}°)  I={b.current_ma:+6.0f} mA"
+                f"({b.position * TICK_TO_DEG:6.1f}°)  "
+                f"I={b.current_ma:+6.0f} mA  T={b.temperature_c:>3}°C"
             )
         except Exception as e:
             status_a.config(text=f"read error: {e}")
@@ -508,6 +548,35 @@ def cmd_gui(args: argparse.Namespace) -> int:
         offset_var.set(0)
         on_slider("")
 
+    def on_overload_toggle(*_) -> None:
+        g = state["gripper"]
+        if g is None:
+            return
+        enabled = overload_var.get()
+        if not enabled and not messagebox.askokcancel(
+            "Disable overload protection?",
+            "The servo will no longer auto-shutdown when it's being pushed too hard.\n\n"
+            "Keep an eye on the live temperature — if it climbs past ~70 °C, back off.",
+        ):
+            overload_var.set(True)
+            return
+        try:
+            g.set_overload_protection(enabled)
+        except Exception as e:
+            messagebox.showerror("Failsafe", str(e))
+
+    def do_reboot() -> None:
+        g = state["gripper"]
+        if g is None:
+            messagebox.showinfo("Reboot", "Connect first.")
+            return
+        try:
+            g.reboot()
+        except Exception as e:
+            messagebox.showerror("Reboot", str(e))
+            return
+        messagebox.showinfo("Reboot", "Servos rebooted. Reconnect or press Home.")
+
     def on_torque_toggle(*_) -> None:
         g = state["gripper"]
         if g is None:
@@ -529,6 +598,8 @@ def cmd_gui(args: argparse.Namespace) -> int:
     close_btn.config(command=lambda: jog(FINE_STEP))
     slider.config(command=on_slider)
     torque_var.trace_add("write", on_torque_toggle)
+    overload_var.trace_add("write", on_overload_toggle)
+    reboot_btn.config(command=do_reboot)
     root.bind("<Left>", lambda _e: jog(-FINE_STEP))
     root.bind("<Right>", lambda _e: jog(FINE_STEP))
     root.bind("<Up>", lambda _e: on_home())
