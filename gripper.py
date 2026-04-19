@@ -143,8 +143,10 @@ class Gripper:
 
     def set_offset(self, offset: int) -> None:
         self.offset = max(self.open_limit, min(self.close_limit, offset))
-        goal_a = self.home_a + self.offset
-        goal_b = self.home_b + (-self.offset if self.mirror else self.offset)
+        # Positive offset = close. Hardware direction chosen to match the
+        # Open/Close button labels on the user's gripper assembly.
+        goal_a = self.home_a - self.offset
+        goal_b = self.home_b + (self.offset if self.mirror else -self.offset)
         self.sync_write.clearParam()
         for sid, goal in ((self.id_a, goal_a), (self.id_b, goal_b)):
             goal &= 0xFFFFFFFF
@@ -190,6 +192,23 @@ class Gripper:
             self._write1(sid, ADDR_TORQUE_ENABLE, 0)
             self._write1(sid, ADDR_SHUTDOWN, new)
             self._write1(sid, ADDR_TORQUE_ENABLE, 1)
+
+    def zero_at_current(self, close_angle_deg: float = 90.0) -> None:
+        """Treat the current servo positions as fully-open; close_limit is
+        `close_angle_deg` past that (each servo rotates that angle — with
+        mirror on, the jaws close toward each other)."""
+        rc = self.sync_read.txRxPacket()
+        if rc != COMM_SUCCESS:
+            raise RuntimeError(f"sync_read tx: {self.packet.getTxRxResult(rc)}")
+        self.home_a = signed(
+            self.sync_read.getData(self.id_a, ADDR_PRESENT_POSITION, 4), 32
+        )
+        self.home_b = signed(
+            self.sync_read.getData(self.id_b, ADDR_PRESENT_POSITION, 4), 32
+        )
+        self.offset = 0
+        self.open_limit = 0
+        self.close_limit = int(round(close_angle_deg * 4096 / 360))
 
     def reboot(self) -> None:
         """Clear hardware-error shutdowns without power-cycling."""
@@ -385,6 +404,15 @@ def cmd_gui(args: argparse.Namespace) -> int:
     torque_cb = ttk.Checkbutton(ctrl, text="Torque", variable=torque_var)
     torque_cb.grid(row=1, column=3, columnspan=2, padx=10)
 
+    zero_btn = ttk.Button(ctrl, text="Zero at current (fully open)")
+    zero_btn.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    ttk.Label(ctrl, text="Close angle:").grid(row=2, column=3, sticky="e")
+    close_angle_var = tk.DoubleVar(value=90.0)
+    ttk.Entry(ctrl, textvariable=close_angle_var, width=5).grid(
+        row=2, column=4, sticky="w"
+    )
+    ttk.Label(ctrl, text="°").grid(row=2, column=5, sticky="w")
+
     fs = ttk.LabelFrame(root, text="Failsafe", padding=10)
     fs.grid(row=2, column=0, sticky="ew", padx=10, pady=8)
     overload_var = tk.BooleanVar(value=True)
@@ -565,6 +593,31 @@ def cmd_gui(args: argparse.Namespace) -> int:
         except Exception as e:
             messagebox.showerror("Failsafe", str(e))
 
+    def do_zero() -> None:
+        g = state["gripper"]
+        if g is None:
+            messagebox.showinfo("Zero", "Connect first.")
+            return
+        try:
+            angle = float(close_angle_var.get())
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Zero", "Close angle must be a number.")
+            return
+        try:
+            g.zero_at_current(close_angle_deg=angle)
+        except Exception as e:
+            messagebox.showerror("Zero", str(e))
+            return
+        home_a_var.set(g.home_a)
+        home_b_var.set(g.home_b)
+        slider.config(from_=g.open_limit, to=g.close_limit)
+        offset_var.set(0)
+        offset_label.config(text="0")
+        try:
+            g.set_offset(0)
+        except Exception as e:
+            messagebox.showerror("Zero", str(e))
+
     def do_reboot() -> None:
         g = state["gripper"]
         if g is None:
@@ -600,6 +653,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
     torque_var.trace_add("write", on_torque_toggle)
     overload_var.trace_add("write", on_overload_toggle)
     reboot_btn.config(command=do_reboot)
+    zero_btn.config(command=do_zero)
     root.bind("<Left>", lambda _e: jog(-FINE_STEP))
     root.bind("<Right>", lambda _e: jog(FINE_STEP))
     root.bind("<Up>", lambda _e: on_home())
