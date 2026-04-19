@@ -284,8 +284,12 @@ def cbreak_loop(gripper: Gripper) -> None:
 
 
 def cmd_gui(args: argparse.Namespace) -> int:
+    import os
+    import subprocess
     import tkinter as tk
     from tkinter import messagebox, ttk
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
 
     root = tk.Tk()
     root.title("Dynamixel Gripper")
@@ -327,8 +331,10 @@ def cmd_gui(args: argparse.Namespace) -> int:
     connect_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
     scan_btn = ttk.Button(conn, text="Scan")
     scan_btn.grid(row=3, column=2, columnspan=2, sticky="ew", pady=(8, 0))
+    update_btn = ttk.Button(conn, text="Check for updates")
+    update_btn.grid(row=3, column=4, columnspan=2, sticky="ew", pady=(8, 0))
     conn_status = ttk.Label(conn, text="disconnected", foreground="gray")
-    conn_status.grid(row=3, column=4, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
+    conn_status.grid(row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
     ctrl = ttk.LabelFrame(root, text="Control", padding=10)
     ctrl.grid(row=1, column=0, sticky="ew", padx=10, pady=8)
@@ -383,6 +389,40 @@ def cmd_gui(args: argparse.Namespace) -> int:
         except Exception as e:
             status_a.config(text=f"read error: {e}")
         state["poll_id"] = root.after(100, poll)
+
+    def do_update() -> None:
+        if not os.path.isdir(os.path.join(repo_dir, ".git")):
+            messagebox.showerror(
+                "Update", "Not a git checkout — can't pull updates here."
+            )
+            return
+        try:
+            res = subprocess.run(
+                ["git", "pull", "--ff-only"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            messagebox.showerror("Update", "git pull timed out (network?).")
+            return
+        except FileNotFoundError:
+            messagebox.showerror("Update", "git isn't installed.")
+            return
+        if res.returncode != 0:
+            messagebox.showerror(
+                "Update", (res.stderr or res.stdout or "git failed").strip()
+            )
+            return
+        out = (res.stdout or "").strip()
+        if "Already up to date" in out or not out:
+            messagebox.showinfo("Update", "Already up to date.")
+        else:
+            messagebox.showinfo(
+                "Update",
+                f"{out}\n\nQuit and double-click Gripper.command again to run the new version.",
+            )
 
     def do_scan() -> None:
         packet = PacketHandler(PROTOCOL_VERSION)
@@ -483,6 +523,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
     connect_btn.config(command=do_connect)
     scan_btn.config(command=do_scan)
+    update_btn.config(command=do_update)
     open_btn.config(command=lambda: jog(-FINE_STEP))
     home_btn.config(command=on_home)
     close_btn.config(command=lambda: jog(FINE_STEP))

@@ -5,6 +5,12 @@
 set -e
 cd "$(dirname "$0")"
 
+if [ -d .git ]; then
+    echo "Checking for updates..."
+    git fetch --quiet origin 2>/dev/null || echo "  (offline, skipping)"
+    git pull --ff-only --quiet 2>/dev/null || echo "  (no fast-forward update available)"
+fi
+
 PY=/opt/homebrew/bin/python3
 [ -x "$PY" ] || PY=python3
 
