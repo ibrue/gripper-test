@@ -2,10 +2,8 @@
 
 Usage:
     python gripper.py scan [--port /dev/tty.usbserial-FTB8HK9X]
-    python gripper.py run  [--port ...] [--baud 57600]
-                           [--id-a 1] [--id-b 2]
-                           [--mirror / --no-mirror]
-                           [--home-a 2048] [--home-b 2048]
+    python gripper.py run  [--port ...] [--baud 57600] ...
+    python gripper.py gui  [--port ...]
 """
 
 import argparse
@@ -285,6 +283,220 @@ def cbreak_loop(gripper: Gripper) -> None:
         print()
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.title("Dynamixel Gripper")
+    root.resizable(False, False)
+
+    state: dict = {"gripper": None, "poll_id": None}
+
+    conn = ttk.LabelFrame(root, text="Connection", padding=10)
+    conn.grid(row=0, column=0, sticky="ew", padx=10, pady=8)
+
+    ttk.Label(conn, text="Port:").grid(row=0, column=0, sticky="w")
+    port_var = tk.StringVar(value=args.port)
+    ttk.Entry(conn, textvariable=port_var, width=34).grid(
+        row=0, column=1, columnspan=5, sticky="ew", padx=4
+    )
+
+    ttk.Label(conn, text="Baud:").grid(row=1, column=0, sticky="w")
+    baud_var = tk.IntVar(value=57600)
+    ttk.Entry(conn, textvariable=baud_var, width=8).grid(row=1, column=1, sticky="w")
+    ttk.Label(conn, text="ID A:").grid(row=1, column=2, sticky="e")
+    id_a_var = tk.IntVar(value=1)
+    ttk.Entry(conn, textvariable=id_a_var, width=4).grid(row=1, column=3, sticky="w")
+    ttk.Label(conn, text="ID B:").grid(row=1, column=4, sticky="e")
+    id_b_var = tk.IntVar(value=2)
+    ttk.Entry(conn, textvariable=id_b_var, width=4).grid(row=1, column=5, sticky="w")
+
+    ttk.Label(conn, text="Home A:").grid(row=2, column=0, sticky="w")
+    home_a_var = tk.IntVar(value=2048)
+    ttk.Entry(conn, textvariable=home_a_var, width=8).grid(row=2, column=1, sticky="w")
+    ttk.Label(conn, text="Home B:").grid(row=2, column=2, sticky="e")
+    home_b_var = tk.IntVar(value=2048)
+    ttk.Entry(conn, textvariable=home_b_var, width=8).grid(row=2, column=3, sticky="w")
+    mirror_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(conn, text="Mirror", variable=mirror_var).grid(
+        row=2, column=4, columnspan=2, sticky="w"
+    )
+
+    connect_btn = ttk.Button(conn, text="Connect")
+    connect_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    scan_btn = ttk.Button(conn, text="Scan")
+    scan_btn.grid(row=3, column=2, columnspan=2, sticky="ew", pady=(8, 0))
+    conn_status = ttk.Label(conn, text="disconnected", foreground="gray")
+    conn_status.grid(row=3, column=4, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
+
+    ctrl = ttk.LabelFrame(root, text="Control", padding=10)
+    ctrl.grid(row=1, column=0, sticky="ew", padx=10, pady=8)
+
+    ttk.Label(ctrl, text="Offset:").grid(row=0, column=0, sticky="w")
+    offset_var = tk.IntVar(value=0)
+    slider = ttk.Scale(
+        ctrl, from_=-600, to=600, orient="horizontal", length=320, variable=offset_var
+    )
+    slider.grid(row=0, column=1, columnspan=4, sticky="ew", padx=6)
+    offset_label = ttk.Label(ctrl, text="0", width=6)
+    offset_label.grid(row=0, column=5, sticky="w")
+
+    open_btn = ttk.Button(ctrl, text="◀ Open")
+    open_btn.grid(row=1, column=0, padx=2, pady=6)
+    home_btn = ttk.Button(ctrl, text="Home")
+    home_btn.grid(row=1, column=1, padx=2, pady=6)
+    close_btn = ttk.Button(ctrl, text="Close ▶")
+    close_btn.grid(row=1, column=2, padx=2, pady=6)
+    torque_var = tk.BooleanVar(value=True)
+    torque_cb = ttk.Checkbutton(ctrl, text="Torque", variable=torque_var)
+    torque_cb.grid(row=1, column=3, columnspan=2, padx=10)
+
+    status = ttk.LabelFrame(root, text="Status", padding=10)
+    status.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 12))
+    mono = ("Menlo", 12)
+    status_a = ttk.Label(status, text="Servo A:  —", font=mono)
+    status_a.grid(row=0, column=0, sticky="w")
+    status_b = ttk.Label(status, text="Servo B:  —", font=mono)
+    status_b.grid(row=1, column=0, sticky="w")
+
+    def stop_poll() -> None:
+        if state["poll_id"] is not None:
+            root.after_cancel(state["poll_id"])
+            state["poll_id"] = None
+
+    def poll() -> None:
+        g = state["gripper"]
+        if g is None:
+            return
+        try:
+            s = g.read_state()
+            a, b = s[g.id_a], s[g.id_b]
+            status_a.config(
+                text=f"Servo A:  pos={a.position:>5}  "
+                f"({a.position * TICK_TO_DEG:6.1f}°)  I={a.current_ma:+6.0f} mA"
+            )
+            status_b.config(
+                text=f"Servo B:  pos={b.position:>5}  "
+                f"({b.position * TICK_TO_DEG:6.1f}°)  I={b.current_ma:+6.0f} mA"
+            )
+        except Exception as e:
+            status_a.config(text=f"read error: {e}")
+        state["poll_id"] = root.after(100, poll)
+
+    def do_scan() -> None:
+        packet = PacketHandler(PROTOCOL_VERSION)
+        found = []
+        for baud in SCAN_BAUDRATES:
+            p = PortHandler(port_var.get())
+            if not p.openPort():
+                messagebox.showerror("Scan", f"cannot open {port_var.get()}")
+                return
+            if not p.setBaudRate(baud):
+                p.closePort()
+                continue
+            for sid in SCAN_IDS:
+                model, rc, err = packet.ping(p, sid)
+                if rc == COMM_SUCCESS and err == 0:
+                    found.append((baud, sid, model))
+            p.closePort()
+        if not found:
+            messagebox.showwarning("Scan", "No servos found.")
+            return
+        if len(found) >= 2 and found[0][0] == found[1][0]:
+            baud_var.set(found[0][0])
+            id_a_var.set(found[0][1])
+            id_b_var.set(found[1][1])
+        msg = "\n".join(f"baud={b}  id={i}  model={m}" for b, i, m in found)
+        messagebox.showinfo("Scan", msg)
+
+    def do_connect() -> None:
+        try:
+            g = Gripper(
+                port_name=port_var.get(),
+                baud=baud_var.get(),
+                id_a=id_a_var.get(),
+                id_b=id_b_var.get(),
+                home_a=home_a_var.get(),
+                home_b=home_b_var.get(),
+                mirror=mirror_var.get(),
+            )
+            g.connect()
+            g.set_offset(0)
+        except Exception as e:
+            messagebox.showerror("Connect", str(e))
+            return
+        state["gripper"] = g
+        conn_status.config(
+            text=f"connected  {id_a_var.get()}/{id_b_var.get()}", foreground="#2a8a2a"
+        )
+        connect_btn.config(text="Disconnect", command=do_disconnect)
+        poll()
+
+    def do_disconnect() -> None:
+        stop_poll()
+        g = state["gripper"]
+        if g is not None:
+            try:
+                g.close()
+            except Exception:
+                pass
+        state["gripper"] = None
+        conn_status.config(text="disconnected", foreground="gray")
+        connect_btn.config(text="Connect", command=do_connect)
+        status_a.config(text="Servo A:  —")
+        status_b.config(text="Servo B:  —")
+
+    def apply_offset() -> None:
+        g = state["gripper"]
+        if g is None:
+            return
+        try:
+            g.set_offset(int(offset_var.get()))
+        except Exception as e:
+            messagebox.showerror("Move", str(e))
+
+    def on_slider(_: str) -> None:
+        offset_label.config(text=str(int(offset_var.get())))
+        apply_offset()
+
+    def jog(delta: int) -> None:
+        offset_var.set(max(-600, min(600, int(offset_var.get()) + delta)))
+        on_slider("")
+
+    def on_home() -> None:
+        offset_var.set(0)
+        on_slider("")
+
+    def on_torque_toggle(*_) -> None:
+        g = state["gripper"]
+        if g is None:
+            return
+        try:
+            g.set_torque(torque_var.get())
+        except Exception as e:
+            messagebox.showerror("Torque", str(e))
+
+    def on_close_window() -> None:
+        do_disconnect()
+        root.destroy()
+
+    connect_btn.config(command=do_connect)
+    scan_btn.config(command=do_scan)
+    open_btn.config(command=lambda: jog(-FINE_STEP))
+    home_btn.config(command=on_home)
+    close_btn.config(command=lambda: jog(FINE_STEP))
+    slider.config(command=on_slider)
+    torque_var.trace_add("write", on_torque_toggle)
+    root.bind("<Left>", lambda _e: jog(-FINE_STEP))
+    root.bind("<Right>", lambda _e: jog(FINE_STEP))
+    root.bind("<Up>", lambda _e: on_home())
+    root.protocol("WM_DELETE_WINDOW", on_close_window)
+
+    root.mainloop()
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     gripper = Gripper(
         port_name=args.port,
@@ -329,6 +541,10 @@ def main() -> int:
     mir.add_argument("--mirror", dest="mirror", action="store_true", default=True)
     mir.add_argument("--no-mirror", dest="mirror", action="store_false")
     p_run.set_defaults(func=cmd_run)
+
+    p_gui = sub.add_parser("gui", help="tkinter GUI with buttons and live readout")
+    p_gui.add_argument("--port", default=default_port)
+    p_gui.set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
     return args.func(args)
