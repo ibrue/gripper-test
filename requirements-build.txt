@@ -1,0 +1,3 @@
+# Build-time deps for producing the standalone umi.app on macOS.
+# Install alongside requirements.txt before running ./build_app.sh.
+py2app>=0.28
