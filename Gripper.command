@@ -1,7 +1,9 @@
 #!/bin/bash
-# Double-click this file in Finder to launch the gripper GUI.
+# Double-click this file in Finder to launch umi (gripper studio).
 # One-time prerequisites (run in Terminal):
 #   brew install python-tk@3.14
+# Optional: install the Moonhouse font (free for personal use, dafont.com)
+# and double-click the .ttf in Font Book to enable the umi brand header.
 set -e
 cd "$(dirname "$0")"
 
@@ -35,4 +37,4 @@ EOF
     exit 1
 fi
 
-exec python gripper.py gui
+exec python gripper.py studio

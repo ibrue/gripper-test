@@ -1,9 +1,11 @@
-"""Two-servo Dynamixel XL330 gripper controller.
+"""umi — two-servo Dynamixel XL330 gripper controller.
 
 Usage:
-    python gripper.py scan [--port /dev/tty.usbserial-FTB8HK9X]
-    python gripper.py run  [--port ...] [--baud 57600] ...
-    python gripper.py gui  [--port ...]
+    python gripper.py scan    [--port /dev/tty.usbserial-FTB8HK9X]
+    python gripper.py run     [--port ...] [--baud 57600] ...
+    python gripper.py gui     [--port ...]   # legacy single-window UI
+    python gripper.py studio  [--port ...]   # umi data-collection studio
+                                             # (servo + camera SLAM + IMU)
 """
 
 import argparse
@@ -712,8 +714,21 @@ def main() -> int:
     p_gui.add_argument("--port", default=default_port)
     p_gui.set_defaults(func=cmd_gui)
 
+    p_studio = sub.add_parser(
+        "studio",
+        help="umi data-collection studio: arrow-key jog, live plots, "
+             "camera+SLAM, IMU, recording",
+    )
+    p_studio.add_argument("--port", default=default_port)
+    p_studio.set_defaults(func=cmd_studio)
+
     args = parser.parse_args()
     return args.func(args)
+
+
+def cmd_studio(args: argparse.Namespace) -> int:
+    from studio import run_studio
+    return run_studio(default_port=args.port)
 
 
 if __name__ == "__main__":

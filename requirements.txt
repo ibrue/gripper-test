@@ -1,1 +1,8 @@
 dynamixel-sdk>=3.7.31
+# studio mode (camera SLAM + plots + IMU + recording)
+opencv-python>=4.8
+numpy>=1.24
+matplotlib>=3.7
+Pillow>=10.0
+# optional, only needed for the IMU "Load .insv" button:
+#   pip install telemetry-parser-py
