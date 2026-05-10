@@ -66,6 +66,7 @@ from imu import (
 )
 from dataset import DatasetManager, Episode
 from x3_control import X3Control, X3Device
+import version as umi_version
 
 
 # -----------------------------------------------------------------------------
@@ -360,6 +361,18 @@ class Studio:
         )
         tag.pack(side="left", padx=(12, 0), pady=(20, 0))
 
+        self._repo_dir = os.path.dirname(os.path.abspath(__file__))
+        self._current_sha = umi_version.current_commit(self._repo_dir)
+        version_text = f"v {umi_version.short(self._current_sha)}"
+        ttk.Button(header, text="Update…", command=self._check_for_updates).pack(
+            side="right", padx=(0, 0),
+        )
+        self.version_label = tk.Label(
+            header, text=version_text, fg=DIM, bg=BG,
+            font=(self.brand_family, 11),
+        )
+        self.version_label.pack(side="right", padx=(0, 12), pady=(22, 0))
+
         body = ttk.Frame(self.root, style="TFrame")
         body.pack(fill="both", expand=True, padx=18, pady=(0, 14))
         body.columnconfigure(0, weight=0, minsize=380)
@@ -536,12 +549,16 @@ class Studio:
         ttk.Button(f, text="■ SD stop", command=self._do_x3_stop_record).grid(
             row=4, column=1, sticky="ew", padx=(4, 0), pady=(6, 0),
         )
+        ttk.Button(f, text="Inspect GATT…", command=self._do_x3_inspect).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0),
+        )
         ttk.Label(
             f,
             text=("BLE runs alongside USB webcam mode. SD record/stop need "
-                  "protocol bytes filled into x3_control.PROPRIETARY_COMMANDS."),
+                  "protocol bytes in x3_control.PROPRIETARY_COMMANDS — use "
+                  "Inspect to discover service/characteristic UUIDs."),
             style="PanelDim.TLabel", wraplength=320,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         f.columnconfigure(0, weight=1)
         f.columnconfigure(1, weight=1)
 
@@ -1084,6 +1101,125 @@ class Studio:
             return
         if not self.x3.stop_sd_recording():
             messagebox.showwarning("X3", self.x3.last_error or "command failed")
+
+    def _do_x3_inspect(self) -> None:
+        if not self.x3.connected:
+            messagebox.showinfo("X3", "Connect to the camera first.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("X3 GATT inspector")
+        win.configure(bg=BG)
+        win.geometry("760x520")
+        header = ttk.Frame(win, style="TFrame")
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        tk.Label(
+            header,
+            text=f"GATT services for {self.x3.connected_to.name if self.x3.connected_to else 'camera'}",
+            fg=INK, bg=BG, font=(self.brand_family, 14),
+        ).pack(side="left")
+        status = tk.Label(header, text="loading…", fg=DIM, bg=BG)
+        status.pack(side="right")
+        body = ttk.Frame(win, style="TFrame")
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        text = tk.Text(
+            body, bg=PANEL, fg=INK, insertbackground=INK, bd=0, relief="flat",
+            font=("Menlo", 11), wrap="none",
+        )
+        text.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        sb.pack(side="right", fill="y")
+        text.configure(yscrollcommand=sb.set)
+        footer = ttk.Frame(win, style="TFrame")
+        footer.pack(fill="x", padx=12, pady=(0, 12))
+
+        def copy_to_clipboard() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text.get("1.0", "end"))
+            status.configure(text="copied to clipboard")
+
+        ttk.Button(footer, text="Copy", command=copy_to_clipboard).pack(side="left")
+        ttk.Button(footer, text="Close", command=win.destroy).pack(side="right")
+
+        def work() -> None:
+            chars = self.x3.list_characteristics()
+            self.root.after(0, lambda: render(chars))
+
+        def render(chars: list) -> None:
+            if not chars:
+                status.configure(text=self.x3.last_error or "no characteristics")
+                return
+            lines = []
+            current_svc = None
+            for svc, ch, props in chars:
+                if svc != current_svc:
+                    lines.append("")
+                    lines.append(f"service  {svc}")
+                    current_svc = svc
+                props_str = ",".join(props)
+                lines.append(f"  char  {ch}   [{props_str}]")
+            text.insert("1.0", "\n".join(lines).lstrip())
+            status.configure(text=f"{len(chars)} characteristic(s)")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- updates ----------------------------------------------------------
+
+    def _check_for_updates(self) -> None:
+        self._set_status("checking for updates…")
+
+        def work() -> None:
+            latest = umi_version.latest_remote_commit()
+            self.root.after(0, lambda: self._update_result(latest))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_result(self, latest_sha: Optional[str]) -> None:
+        current = self._current_sha
+        if latest_sha is None:
+            messagebox.showwarning(
+                "Update",
+                "Couldn't reach GitHub.\n"
+                f"Repo: {umi_version.REPO_URL}",
+            )
+            self._set_status("update check failed.")
+            return
+        if current and latest_sha == current:
+            messagebox.showinfo(
+                "Update",
+                f"Up to date.\n\nCurrent: {umi_version.short(current)}",
+            )
+            self._set_status("up to date.")
+            return
+        cur_s = umi_version.short(current)
+        new_s = umi_version.short(latest_sha)
+        if umi_version.is_dev_checkout(self._repo_dir):
+            if not messagebox.askyesno(
+                "Update available",
+                f"New commit on main: {new_s}\n"
+                f"You have:          {cur_s}\n\n"
+                "Pull with git pull --ff-only?",
+            ):
+                self._set_status("update declined.")
+                return
+            ok, msg = umi_version.pull(self._repo_dir)
+            if not ok:
+                messagebox.showerror("Update", msg)
+                return
+            messagebox.showinfo(
+                "Updated",
+                f"{msg}\n\nQuit and relaunch umi to load the new code.",
+            )
+            self._set_status("update pulled — relaunch to apply.")
+        else:
+            if messagebox.askyesno(
+                "Update available",
+                f"New commit on main: {new_s}\n"
+                f"This bundle:        {cur_s}\n\n"
+                "Open the repo to pull the source and rerun build_app.sh?",
+            ):
+                import webbrowser
+                webbrowser.open(umi_version.REPO_URL)
+            self._set_status(f"newer version available ({new_s}).")
 
     # ---- dataset tab ------------------------------------------------------
 
