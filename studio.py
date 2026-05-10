@@ -64,6 +64,8 @@ from imu import (
     ImuSample,
     OrientationTracker,
 )
+from dataset import DatasetManager, Episode
+from x3_control import X3Control, X3Device
 
 
 # -----------------------------------------------------------------------------
@@ -165,30 +167,37 @@ CSV_COLUMNS = [
 ]
 
 
-class Recorder:
-    """Thread-safe recorder. Sample writer is poked by the main poll loop;
-    video writer is poked by the camera worker via ``write_frame``."""
+class EpisodeRecorder:
+    """Writes one Episode: samples.csv + optional video.mp4. ``finalize``
+    updates the episode's meta.json with duration / counts when stopped."""
 
-    def __init__(self, csv_path: str, video_path: Optional[str]):
-        self.csv_path = csv_path
-        self.video_path = video_path
+    def __init__(self, episode: Episode, record_video: bool):
+        self.episode = episode
+        self.record_video = record_video
         self._csv_file = None
         self._csv_writer = None
         self._video_writer = None
         self._video_size: Optional[tuple[int, int]] = None
         self.t0 = time.time()
-        self.n_samples = 0
-        self.n_frames = 0
         self.lock = threading.Lock()
+
+    @property
+    def n_samples(self) -> int:
+        return self.episode.n_samples
+
+    @property
+    def n_frames(self) -> int:
+        return self.episode.n_frames
 
     def start(self) -> None:
         with self.lock:
-            self._csv_file = open(self.csv_path, "w", newline="")
+            self._csv_file = open(self.episode.samples_path, "w", newline="")
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_writer.writerow(CSV_COLUMNS)
             self.t0 = time.time()
-            self.n_samples = 0
-            self.n_frames = 0
+            self.episode.started_at = self.t0
+            self.episode.n_samples = 0
+            self.episode.n_frames = 0
 
     def stop(self) -> None:
         with self.lock:
@@ -199,16 +208,21 @@ class Recorder:
             if self._video_writer is not None:
                 self._video_writer.release()
                 self._video_writer = None
+            self.episode.duration_s = max(0.0, time.time() - self.t0)
+            try:
+                self.episode.save_meta()
+            except OSError:
+                pass
 
     def write_sample(self, row: list) -> None:
         with self.lock:
             if self._csv_writer is None:
                 return
             self._csv_writer.writerow(row)
-            self.n_samples += 1
+            self.episode.n_samples += 1
 
     def write_frame(self, frame) -> None:
-        if cv2 is None or self.video_path is None or frame is None:
+        if cv2 is None or not self.record_video or frame is None:
             return
         with self.lock:
             if self._video_writer is None:
@@ -216,12 +230,12 @@ class Recorder:
                 self._video_size = (w, h)
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 self._video_writer = cv2.VideoWriter(
-                    self.video_path, fourcc, 30.0, (w, h)
+                    self.episode.video_path, fourcc, 30.0, (w, h)
                 )
             elif self._video_size != (frame.shape[1], frame.shape[0]):
-                return  # silently skip mismatched-size frames
+                return
             self._video_writer.write(frame)
-            self.n_frames += 1
+            self.episode.n_frames += 1
 
 
 # -----------------------------------------------------------------------------
@@ -256,13 +270,18 @@ class Studio:
     POLL_MS = 50
     PLOT_MS = 100
 
-    def __init__(self, default_port: str):
+    def __init__(self, default_port: str, dataset_root: str):
         self.default_port = default_port
         self.gripper: Optional[Gripper] = None
         self.camera: Optional[CameraWorker] = None
         self.orientation = OrientationTracker(beta=0.05)
         self.imu_replay: Optional[ImuReplay] = None
-        self.recorder: Optional[Recorder] = None
+        self.recorder: Optional[EpisodeRecorder] = None
+        self.dataset = DatasetManager(dataset_root)
+        self.x3 = X3Control()
+        self.x3.start()
+        self._x3_devices: list[X3Device] = []
+        self._selected_episode: Optional[Episode] = None
 
         self.series = TimeSeries(maxlen=600)
         self.jog = HoldJog()
@@ -347,10 +366,27 @@ class Studio:
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(body, style="TFrame")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        left_outer = ttk.Frame(body, style="TFrame")
+        left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        left_canvas = tk.Canvas(
+            left_outer, bg=BG, highlightthickness=0, width=360,
+        )
+        left_canvas.pack(side="left", fill="both", expand=True)
+        left_scroll = ttk.Scrollbar(
+            left_outer, orient="vertical", command=left_canvas.yview,
+        )
+        left_scroll.pack(side="right", fill="y")
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left = ttk.Frame(left_canvas, style="TFrame")
+        left_canvas.create_window((0, 0), window=left, anchor="nw", width=360)
+        left.bind(
+            "<Configure>",
+            lambda _e: left_canvas.configure(scrollregion=left_canvas.bbox("all")),
+        )
+
         self._build_connect(left)
         self._build_control(left)
+        self._build_x3_panel(left)
         self._build_imu_panel(left)
         self._build_recording(left)
         self._build_failsafe(left)
@@ -360,6 +396,7 @@ class Studio:
         self._build_servo_tab(right)
         self._build_slam_tab(right)
         self._build_trajectory_tab(right)
+        self._build_dataset_tab(right)
 
         # Status bar
         self.status_var = tk.StringVar(value="ready.")
@@ -476,25 +513,62 @@ class Studio:
         f.columnconfigure(0, weight=1)
         f.columnconfigure(1, weight=1)
 
+    def _build_x3_panel(self, parent: ttk.Frame) -> None:
+        f = ttk.LabelFrame(parent, text="Insta360 X3  (Bluetooth)", padding=10)
+        f.pack(fill="x", pady=(0, 10))
+        self.x3_status = ttk.Label(f, text="not connected", style="PanelDim.TLabel")
+        self.x3_status.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.x3_devices_var = tk.StringVar(value="")
+        self.x3_devices_combo = ttk.Combobox(
+            f, textvariable=self.x3_devices_var, state="readonly", values=[],
+        )
+        self.x3_devices_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(f, text="Scan", command=self._do_x3_scan).grid(
+            row=2, column=0, sticky="ew", padx=(0, 4), pady=(6, 0),
+        )
+        self.x3_connect_btn = ttk.Button(f, text="Connect", command=self._do_x3_connect)
+        self.x3_connect_btn.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(6, 0))
+        self.x3_battery = ttk.Label(f, text="battery —", style="Panel.TLabel")
+        self.x3_battery.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="● SD record", command=self._do_x3_start_record).grid(
+            row=4, column=0, sticky="ew", padx=(0, 4), pady=(6, 0),
+        )
+        ttk.Button(f, text="■ SD stop", command=self._do_x3_stop_record).grid(
+            row=4, column=1, sticky="ew", padx=(4, 0), pady=(6, 0),
+        )
+        ttk.Label(
+            f,
+            text=("BLE runs alongside USB webcam mode. SD record/stop need "
+                  "protocol bytes filled into x3_control.PROPRIETARY_COMMANDS."),
+            style="PanelDim.TLabel", wraplength=320,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        f.columnconfigure(0, weight=1)
+        f.columnconfigure(1, weight=1)
+
     def _build_recording(self, parent: ttk.Frame) -> None:
         f = ttk.LabelFrame(parent, text="Recording", padding=10)
         f.pack(fill="x", pady=(0, 10))
-        self.rec_dir_var = tk.StringVar(value=os.path.expanduser("~/umi-recordings"))
-        ttk.Label(f, text="Folder", style="PanelDim.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(f, text="Dataset", style="PanelDim.TLabel").grid(row=0, column=0, sticky="w")
+        self.rec_dir_var = tk.StringVar(value=self.dataset.root)
         ttk.Entry(f, textvariable=self.rec_dir_var).grid(
             row=0, column=1, columnspan=2, sticky="ew", padx=(4, 0),
         )
         ttk.Button(f, text="…", width=2, command=self._pick_rec_dir).grid(
             row=0, column=3, sticky="w", padx=(4, 0),
         )
+        ttk.Label(f, text="Task", style="PanelDim.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.rec_task_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self.rec_task_var).grid(
+            row=1, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0),
+        )
         self.rec_video_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             f, text="Also save MP4 of camera feed", variable=self.rec_video_var,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
-        self.rec_btn = ttk.Button(f, text="● Start recording", command=self._toggle_record)
-        self.rec_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.rec_btn = ttk.Button(f, text="● Start episode", command=self._toggle_record)
+        self.rec_btn.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.rec_status = ttk.Label(f, text="not recording", style="PanelDim.TLabel")
-        self.rec_status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.rec_status.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         for c in range(4):
             f.columnconfigure(c, weight=1)
 
@@ -580,6 +654,64 @@ class Studio:
                                    fg=DIM, font=(self.brand_family, 14))
         self.cam_canvas.pack(fill="both", expand=True)
         self._cam_imgtk = None  # keep ref so PhotoImage isn't GC'd
+
+    def _build_dataset_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, style="TFrame")
+        nb.add(tab, text="  Dataset  ")
+        top = ttk.Frame(tab, style="TFrame")
+        top.pack(fill="x", padx=8, pady=8)
+        ttk.Button(top, text="Refresh", command=self._refresh_dataset).pack(side="left")
+        ttk.Button(top, text="Reveal folder", command=self._reveal_dataset_root).pack(
+            side="left", padx=(6, 0),
+        )
+        ttk.Button(top, text="Reveal episode", command=self._reveal_episode).pack(
+            side="left", padx=(6, 0),
+        )
+        ttk.Button(top, text="Delete episode", command=self._delete_episode).pack(
+            side="left", padx=(6, 0),
+        )
+        body = ttk.Frame(tab, style="TFrame")
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        body.columnconfigure(0, weight=2)
+        body.columnconfigure(1, weight=3)
+        body.rowconfigure(0, weight=1)
+        list_frame = ttk.Frame(body, style="TFrame")
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        cols = ("name", "task", "duration", "samples", "video")
+        self.dataset_tree = ttk.Treeview(
+            list_frame, columns=cols, show="headings", height=18,
+        )
+        for c, w in zip(cols, (180, 120, 70, 70, 50)):
+            self.dataset_tree.heading(c, text=c.capitalize())
+            self.dataset_tree.column(c, width=w, anchor="w")
+        self.dataset_tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self.dataset_tree.yview)
+        sb.pack(side="right", fill="y")
+        self.dataset_tree.configure(yscrollcommand=sb.set)
+        self.dataset_tree.bind("<<TreeviewSelect>>", self._on_episode_select)
+
+        detail = ttk.Frame(body, style="TFrame")
+        detail.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(detail, text="Episode", style="Dim.TLabel").pack(anchor="w")
+        self.episode_meta = tk.Text(
+            detail, height=8, bg=PANEL, fg=INK, insertbackground=INK,
+            bd=0, relief="flat", font=("Menlo", 11),
+        )
+        self.episode_meta.pack(fill="x", pady=(4, 8))
+        ttk.Label(detail, text="Task", style="Dim.TLabel").pack(anchor="w")
+        self.episode_task_var = tk.StringVar(value="")
+        ttk.Entry(detail, textvariable=self.episode_task_var).pack(fill="x", pady=(4, 8))
+        ttk.Label(detail, text="Notes", style="Dim.TLabel").pack(anchor="w")
+        self.episode_notes = tk.Text(
+            detail, height=8, bg=PANEL, fg=INK, insertbackground=INK,
+            bd=0, relief="flat", font=("Menlo", 11), wrap="word",
+        )
+        self.episode_notes.pack(fill="both", expand=True, pady=(4, 8))
+        ttk.Button(detail, text="Save notes", command=self._save_episode_notes).pack(
+            anchor="e",
+        )
+        self._refresh_dataset()
 
     def _build_trajectory_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, style="TFrame")
@@ -860,37 +992,236 @@ class Studio:
         d = filedialog.askdirectory(initialdir=self.rec_dir_var.get() or os.path.expanduser("~"))
         if d:
             self.rec_dir_var.set(d)
+            self.dataset = DatasetManager(d)
+            self._refresh_dataset()
+
+    # ---- X3 BLE -----------------------------------------------------------
+
+    def _do_x3_scan(self) -> None:
+        self.x3_status.configure(text="scanning…", foreground=DIM)
+        self.root.update_idletasks()
+
+        def work() -> None:
+            devs = self.x3.scan(duration=4.0)
+            self.root.after(0, lambda: self._x3_scan_done(devs))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _x3_scan_done(self, devs: list[X3Device]) -> None:
+        self._x3_devices = devs
+        labels = [f"{d.name}  ({d.address})  RSSI {d.rssi}" for d in devs]
+        self.x3_devices_combo.configure(values=labels)
+        if labels:
+            self.x3_devices_var.set(labels[0])
+            self.x3_status.configure(
+                text=f"found {len(devs)} camera(s)", foreground=ACCENT,
+            )
+        else:
+            self.x3_status.configure(
+                text=self.x3.last_error or "no Insta360 found", foreground=WARN,
+            )
+
+    def _do_x3_connect(self) -> None:
+        if self.x3.connected:
+            self.x3.disconnect()
+            self.x3_status.configure(text="disconnected", foreground=DIM)
+            self.x3_connect_btn.configure(text="Connect")
+            return
+        sel = self.x3_devices_var.get()
+        if not sel or not self._x3_devices:
+            messagebox.showinfo("X3", "Scan first and pick a camera.")
+            return
+        idx = self.x3_devices_combo.current()
+        if idx < 0 or idx >= len(self._x3_devices):
+            return
+        dev = self._x3_devices[idx]
+        self.x3_status.configure(text="connecting…", foreground=DIM)
+        self.root.update_idletasks()
+
+        def work() -> None:
+            ok = self.x3.connect(dev.address, name=dev.name)
+            self.root.after(0, lambda: self._x3_connect_done(ok, dev))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _x3_connect_done(self, ok: bool, dev: X3Device) -> None:
+        if ok:
+            self.x3_status.configure(text=f"connected: {dev.name}", foreground=OK)
+            self.x3_connect_btn.configure(text="Disconnect")
+            self._poll_x3_battery()
+        else:
+            self.x3_status.configure(
+                text=self.x3.last_error or "connect failed", foreground=WARN,
+            )
+
+    def _poll_x3_battery(self) -> None:
+        if not self.x3.connected:
+            return
+
+        def work() -> None:
+            pct = self.x3.get_battery()
+            self.root.after(0, lambda: self._x3_battery_done(pct))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(15000, self._poll_x3_battery)
+
+    def _x3_battery_done(self, pct: Optional[int]) -> None:
+        if pct is None:
+            self.x3_battery.configure(text="battery —", foreground=DIM)
+        else:
+            color = OK if pct > 30 else WARN
+            self.x3_battery.configure(text=f"battery {pct}%", foreground=color)
+
+    def _do_x3_start_record(self) -> None:
+        if not self.x3.connected:
+            messagebox.showinfo("X3", "Connect to the camera first.")
+            return
+        if not self.x3.start_sd_recording():
+            messagebox.showwarning("X3", self.x3.last_error or "command failed")
+
+    def _do_x3_stop_record(self) -> None:
+        if not self.x3.connected:
+            return
+        if not self.x3.stop_sd_recording():
+            messagebox.showwarning("X3", self.x3.last_error or "command failed")
+
+    # ---- dataset tab ------------------------------------------------------
+
+    def _refresh_dataset(self) -> None:
+        for iid in self.dataset_tree.get_children():
+            self.dataset_tree.delete(iid)
+        for ep in self.dataset.list_episodes():
+            self.dataset_tree.insert(
+                "", "end", iid=ep.path,
+                values=(
+                    ep.name, ep.task,
+                    f"{ep.duration_s:.1f}s",
+                    str(ep.n_samples),
+                    "✓" if ep.has_video else "",
+                ),
+            )
+
+    def _on_episode_select(self, _event=None) -> None:
+        sel = self.dataset_tree.selection()
+        if not sel:
+            return
+        path = sel[0]
+        ep = Episode.load(path)
+        self._selected_episode = ep
+        self.episode_task_var.set(ep.task)
+        self.episode_notes.delete("1.0", "end")
+        self.episode_notes.insert("1.0", ep.notes)
+        meta_lines = [
+            f"path     : {ep.path}",
+            f"started  : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ep.started_at or 0))}",
+            f"duration : {ep.duration_s:.2f} s",
+            f"samples  : {ep.n_samples}",
+            f"frames   : {ep.n_frames}",
+            f"slam     : {ep.slam_backend}",
+            f"gripper  : {ep.gripper}",
+        ]
+        self.episode_meta.delete("1.0", "end")
+        self.episode_meta.insert("1.0", "\n".join(meta_lines))
+
+    def _save_episode_notes(self) -> None:
+        ep = self._selected_episode
+        if ep is None:
+            return
+        notes = self.episode_notes.get("1.0", "end").rstrip("\n")
+        task = self.episode_task_var.get()
+        try:
+            self.dataset.update_notes(ep, notes=notes, task=task)
+        except OSError as e:
+            messagebox.showerror("Dataset", str(e))
+            return
+        self._set_status(f"saved notes for {ep.name}")
+        self._refresh_dataset()
+
+    def _reveal_dataset_root(self) -> None:
+        self._open_in_finder(self.dataset.root)
+
+    def _reveal_episode(self) -> None:
+        ep = self._selected_episode
+        if ep is None:
+            return
+        self._open_in_finder(ep.path)
+
+    def _open_in_finder(self, path: str) -> None:
+        import subprocess
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            elif sys.platform.startswith("linux"):
+                subprocess.run(["xdg-open", path], check=False)
+            elif sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+        except Exception as e:
+            messagebox.showerror("Reveal", str(e))
+
+    def _delete_episode(self) -> None:
+        ep = self._selected_episode
+        if ep is None:
+            return
+        if not messagebox.askyesno(
+            "Delete episode",
+            f"Delete {ep.name}? This removes the whole directory.",
+        ):
+            return
+        try:
+            self.dataset.delete(ep)
+        except OSError as e:
+            messagebox.showerror("Delete", str(e))
+            return
+        self._selected_episode = None
+        self.episode_meta.delete("1.0", "end")
+        self.episode_notes.delete("1.0", "end")
+        self.episode_task_var.set("")
+        self._refresh_dataset()
 
     def _toggle_record(self) -> None:
         if self.recorder is not None:
             self.recorder.stop()
+            ep = self.recorder.episode
+            ep.gripper = {
+                "id_a": self.id_a_var.get(),
+                "id_b": self.id_b_var.get(),
+                "home_a": self.home_a_var.get(),
+                "home_b": self.home_b_var.get(),
+                "mirror": self.mirror_var.get(),
+                "open_limit": self.gripper.open_limit if self.gripper else 0,
+                "close_limit": self.gripper.close_limit if self.gripper else 0,
+            }
+            ep.slam_backend = self.backend_var.get() if self.camera else ""
+            ep.save_meta()
             self.rec_status.configure(
-                text=f"saved {self.recorder.n_samples} samples, "
-                     f"{self.recorder.n_frames} frames",
+                text=f"saved {ep.n_samples} samples, {ep.n_frames} frames → "
+                     f"{ep.name}",
                 foreground=OK,
             )
             self.recorder = None
-            self.rec_btn.configure(text="● Start recording")
+            self.rec_btn.configure(text="● Start episode")
+            self._refresh_dataset()
             return
-        out_dir = self.rec_dir_var.get()
+        new_root = self.rec_dir_var.get()
+        if new_root != self.dataset.root:
+            self.dataset = DatasetManager(new_root)
         try:
-            os.makedirs(out_dir, exist_ok=True)
+            episode = self.dataset.new_episode(
+                task=self.rec_task_var.get(),
+                suffix=self.rec_task_var.get(),
+            )
         except OSError as e:
             messagebox.showerror("Recording", str(e))
             return
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        csv_path = os.path.join(out_dir, f"umi-{stamp}.csv")
-        video_path = (
-            os.path.join(out_dir, f"umi-{stamp}.mp4")
-            if self.rec_video_var.get() and cv2 is not None
-            else None
+        rec = EpisodeRecorder(
+            episode=episode,
+            record_video=self.rec_video_var.get() and cv2 is not None,
         )
-        rec = Recorder(csv_path, video_path)
         rec.start()
         self.recorder = rec
-        self.rec_btn.configure(text="■ Stop recording")
+        self.rec_btn.configure(text="■ Stop episode")
         self.rec_status.configure(
-            text=f"recording → {os.path.basename(csv_path)}", foreground=WARN,
+            text=f"recording → {episode.name}", foreground=WARN,
         )
 
     # ---- main loops -------------------------------------------------------
@@ -1054,6 +1385,10 @@ class Studio:
                 self.gripper.close()
             except Exception:
                 pass
+        try:
+            self.x3.stop()
+        except Exception:
+            pass
         self.root.destroy()
 
     # ---- run --------------------------------------------------------------
@@ -1062,7 +1397,7 @@ class Studio:
         self.root.mainloop()
 
 
-def run_studio(default_port: str) -> int:
-    studio = Studio(default_port=default_port)
+def run_studio(default_port: str, dataset_root: str = "~/umi-data") -> int:
+    studio = Studio(default_port=default_port, dataset_root=os.path.expanduser(dataset_root))
     studio.run()
     return 0
