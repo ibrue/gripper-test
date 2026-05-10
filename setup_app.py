@@ -19,7 +19,7 @@ Notes / gotchas (Apple Silicon):
 from setuptools import setup
 
 APP = ["umi_main.py"]
-DATA_FILES = []
+DATA_FILES = ["VERSION"] if __import__("os").path.exists("VERSION") else []
 
 OPTIONS = {
     "argv_emulation": False,
@@ -49,7 +49,8 @@ OPTIONS = {
         "dynamixel_sdk",
     ],
     "includes": [
-        "studio", "slam", "imu", "dataset", "x3_control",
+        "studio", "slam", "imu", "dataset", "x3_control", "version",
+        "_baked_version",
     ],
     # bleak / telemetry-parser-py are optional; if installed at build time
     # they'll be picked up automatically.
@@ -64,5 +65,6 @@ setup(
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
     setup_requires=["py2app"],
-    py_modules=["gripper", "studio", "slam", "imu", "dataset", "x3_control", "umi_main"],
+    py_modules=["gripper", "studio", "slam", "imu", "dataset", "x3_control",
+                "umi_main", "version", "_baked_version"],
 )
