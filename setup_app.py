@@ -52,9 +52,6 @@ OPTIONS = {
         "studio", "slam", "imu", "dataset", "x3_control", "version",
         "_baked_version",
     ],
-    # bleak / telemetry-parser-py are optional; if installed at build time
-    # they'll be picked up automatically.
-    "optional_packages": ["bleak", "telemetry_parser"],
     # Launch directly into the studio.
     "extra_scripts": [],
 }
