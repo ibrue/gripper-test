@@ -24,9 +24,10 @@ from typing import Optional
 
 REPO_OWNER = "ibrue"
 REPO_NAME = "gripper-test"
+REPO_BRANCH = "claude/dynamixel-gripper-control-aprk8"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 API_LATEST_COMMIT = (
-    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits/main"
+    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits/{REPO_BRANCH}"
 )
 
 

@@ -408,7 +408,6 @@ class Studio:
         right.grid(row=0, column=1, sticky="nsew")
         self._build_servo_tab(right)
         self._build_slam_tab(right)
-        self._build_trajectory_tab(right)
         self._build_dataset_tab(right)
 
         # Status bar
@@ -430,30 +429,56 @@ class Studio:
         self.home_b_var = tk.IntVar(value=2048)
         self.mirror_var = tk.BooleanVar(value=True)
 
+        # Always-visible: port + connect/scan
         ttk.Label(f, text="Port", style="PanelDim.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(f, textvariable=self.port_var, width=28).grid(
             row=0, column=1, columnspan=3, sticky="ew", pady=2,
         )
-        ttk.Label(f, text="Baud", style="PanelDim.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Entry(f, textvariable=self.baud_var, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Label(f, text="ID A/B", style="PanelDim.TLabel").grid(row=1, column=2, sticky="e")
-        ttk.Entry(f, textvariable=self.id_a_var, width=4).grid(row=1, column=3, sticky="w")
-        ttk.Entry(f, textvariable=self.id_b_var, width=4).grid(row=1, column=4, sticky="w")
-        ttk.Label(f, text="Home A/B", style="PanelDim.TLabel").grid(row=2, column=0, sticky="w")
-        ttk.Entry(f, textvariable=self.home_a_var, width=8).grid(row=2, column=1, sticky="w")
-        ttk.Entry(f, textvariable=self.home_b_var, width=8).grid(row=2, column=2, sticky="w")
-        ttk.Checkbutton(f, text="Mirror", variable=self.mirror_var).grid(
-            row=2, column=3, columnspan=2, sticky="w",
-        )
-
         self.connect_btn = ttk.Button(f, text="Connect", command=self._do_connect)
-        self.connect_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.connect_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(f, text="Scan", command=self._do_scan).grid(
-            row=3, column=2, columnspan=2, sticky="ew", pady=(8, 0), padx=(6, 0),
+            row=1, column=2, columnspan=2, sticky="ew", pady=(6, 0), padx=(6, 0),
         )
         self.conn_status = ttk.Label(f, text="disconnected", style="PanelDim.TLabel")
-        self.conn_status.grid(row=4, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        self.conn_status.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        # Collapsible advanced settings (baud, IDs, home, mirror)
+        adv_toggle = tk.Label(
+            f, text="▸ Advanced", fg=DIM, bg=PANEL, cursor="hand2",
+            font=(self.brand_family, 10),
+        )
+        adv_toggle.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        adv = ttk.Frame(f, style="TFrame")
+
+        ttk.Label(adv, text="Baud", style="PanelDim.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(adv, textvariable=self.baud_var, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Label(adv, text="ID A/B", style="PanelDim.TLabel").grid(row=0, column=2, sticky="e")
+        ttk.Entry(adv, textvariable=self.id_a_var, width=4).grid(row=0, column=3, sticky="w")
+        ttk.Entry(adv, textvariable=self.id_b_var, width=4).grid(row=0, column=4, sticky="w")
+        ttk.Label(adv, text="Home A/B", style="PanelDim.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(adv, textvariable=self.home_a_var, width=8).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Entry(adv, textvariable=self.home_b_var, width=8).grid(row=1, column=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(adv, text="Mirror", variable=self.mirror_var).grid(
+            row=1, column=3, columnspan=2, sticky="w", pady=(4, 0),
+        )
         for c in range(5):
+            adv.columnconfigure(c, weight=1)
+
+        self._adv_conn_open = False
+
+        def _toggle_adv(_e=None) -> None:
+            self._adv_conn_open = not self._adv_conn_open
+            if self._adv_conn_open:
+                adv_toggle.configure(text="▾ Advanced")
+                adv.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+            else:
+                adv_toggle.configure(text="▸ Advanced")
+                adv.grid_remove()
+
+        adv_toggle.bind("<Button-1>", _toggle_adv)
+
+        for c in range(4):
             f.columnconfigure(c, weight=1)
 
     def _build_control(self, parent: ttk.Frame) -> None:
@@ -639,6 +664,8 @@ class Studio:
     def _build_slam_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, style="TFrame")
         nb.add(tab, text="  Camera + SLAM  ")
+
+        # Controls bar
         top = ttk.Frame(tab, style="TFrame")
         top.pack(fill="x", padx=8, pady=6)
         self.cam_index_var = tk.IntVar(value=0)
@@ -665,12 +692,40 @@ class Studio:
         self.cam_info = ttk.Label(tab, text="camera off", style="Dim.TLabel")
         self.cam_info.pack(fill="x", padx=8)
 
-        body = ttk.Frame(tab, style="TFrame")
-        body.pack(fill="both", expand=True, padx=8, pady=(6, 8))
-        self.cam_canvas = tk.Label(body, bg=PANEL, text=" camera feed ",
+        # Vertical split: camera feed (top ~60%) + trajectory (bottom ~40%)
+        paned = tk.PanedWindow(
+            tab, orient="vertical", bg=BG,
+            sashwidth=6, sashrelief="flat", sashpad=2,
+        )
+        paned.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        cam_pane = ttk.Frame(paned, style="TFrame")
+        self.cam_canvas = tk.Label(cam_pane, bg=PANEL, text=" camera feed ",
                                    fg=DIM, font=(self.brand_family, 14))
         self.cam_canvas.pack(fill="both", expand=True)
         self._cam_imgtk = None  # keep ref so PhotoImage isn't GC'd
+        paned.add(cam_pane, stretch="always", minsize=120)
+
+        traj_pane = ttk.Frame(paned, style="TFrame")
+        self.fig_traj = Figure(figsize=(7.4, 3.2), dpi=100, facecolor=BG)
+        self.ax_traj = self.fig_traj.add_subplot(111, projection="3d")
+        self.ax_traj.set_facecolor(PANEL)
+        self.ax_traj.tick_params(colors=DIM)
+        self.ax_traj.set_xlabel("x", color=DIM)
+        self.ax_traj.set_ylabel("y", color=DIM)
+        self.ax_traj.set_zlabel("z", color=DIM)
+        self.ax_traj.set_title("camera trajectory  (monocular — relative scale)",
+                               color=DIM, fontsize=10, loc="left")
+        for axis in (self.ax_traj.xaxis, self.ax_traj.yaxis, self.ax_traj.zaxis):
+            axis.set_pane_color((0.11, 0.12, 0.15, 1.0))
+        self.line_traj, = self.ax_traj.plot([0], [0], [0], color=ACCENT, linewidth=1.4)
+        self.scatter_curr = self.ax_traj.scatter([0], [0], [0], color=WARN, s=20)
+        self.canvas_traj = FigureCanvasTkAgg(self.fig_traj, master=traj_pane)
+        self.canvas_traj.get_tk_widget().pack(fill="both", expand=True)
+        paned.add(traj_pane, stretch="always", minsize=80)
+
+    def _build_trajectory_tab(self, nb: ttk.Notebook) -> None:
+        pass  # merged into _build_slam_tab
 
     def _build_dataset_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, style="TFrame")
