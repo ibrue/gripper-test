@@ -405,6 +405,19 @@ class Studio:
         self._build_recording(left)
         self._build_failsafe(left)
 
+        # Enable trackpad / mousewheel scrolling anywhere over the sidebar.
+        def _sidebar_scroll(e: tk.Event) -> None:
+            left_canvas.yview_scroll(int(-e.delta), "units")
+
+        def _bind_scroll(widget: tk.Widget) -> None:
+            widget.bind("<MouseWheel>", _sidebar_scroll, add="+")
+            for child in widget.winfo_children():
+                _bind_scroll(child)
+
+        _bind_scroll(left_canvas)
+        _bind_scroll(left)
+        self._sidebar_bind_scroll = _bind_scroll  # re-use when advanced panel opens
+
         right = ttk.Notebook(body)
         right.grid(row=0, column=1, sticky="nsew")
         self._build_servo_tab(right)
@@ -473,6 +486,8 @@ class Studio:
             if self._adv_conn_open:
                 adv_toggle.configure(text="▾ Advanced")
                 adv.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+                if hasattr(self, "_sidebar_bind_scroll"):
+                    self._sidebar_bind_scroll(adv)
             else:
                 adv_toggle.configure(text="▸ Advanced")
                 adv.grid_remove()
@@ -489,7 +504,7 @@ class Studio:
         self.offset_slider = tk.Scale(
             f, from_=-600, to=600, orient="horizontal",
             variable=self.offset_var, command=self._on_slider,
-            width=28, showvalue=False, bg=PANEL, troughcolor=BG,
+            width=48, showvalue=False, bg=PANEL, troughcolor=BG,
             highlightthickness=0, bd=0, activebackground=ACCENT,
             sliderrelief="flat",
         )
