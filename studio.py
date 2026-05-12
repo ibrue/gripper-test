@@ -343,8 +343,7 @@ class Studio:
         style.map("TNotebook.Tab",
                   background=[("selected", PANEL)],
                   foreground=[("selected", INK)])
-        style.configure("Horizontal.TScale", background=PANEL, troughcolor=BG,
-                        sliderlength=32, sliderthickness=22)
+        style.configure("Horizontal.TScale", background=PANEL, troughcolor=BG)
 
     # ---- layout -----------------------------------------------------------
 
@@ -487,11 +486,14 @@ class Studio:
         f = ttk.LabelFrame(parent, text="Gripper", padding=10)
         f.pack(fill="x", pady=(0, 10))
         self.offset_var = tk.IntVar(value=0)
-        self.offset_slider = ttk.Scale(
+        self.offset_slider = tk.Scale(
             f, from_=-600, to=600, orient="horizontal",
             variable=self.offset_var, command=self._on_slider,
+            width=28, showvalue=False, bg=PANEL, troughcolor=BG,
+            highlightthickness=0, bd=0, activebackground=ACCENT,
+            sliderrelief="flat",
         )
-        self.offset_slider.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.offset_slider.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 4))
         self.offset_readout = ttk.Label(f, text="offset 0  (0.0°)", style="Panel.TLabel")
         self.offset_readout.grid(row=1, column=0, columnspan=4, sticky="w")
 
