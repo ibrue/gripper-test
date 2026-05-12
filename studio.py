@@ -1252,19 +1252,18 @@ class Studio:
                 "Update available",
                 f"New commit on main: {new_s}\n"
                 f"You have:          {cur_s}\n\n"
-                "Pull with git pull --ff-only?",
+                "Pull and relaunch now?",
             ):
                 self._set_status("update declined.")
                 return
-            ok, msg = umi_version.pull(self._repo_dir)
-            if not ok:
-                messagebox.showerror("Update", msg)
-                return
-            messagebox.showinfo(
-                "Updated",
-                f"{msg}\n\nQuit and relaunch umi to load the new code.",
-            )
-            self._set_status("update pulled — relaunch to apply.")
+            self._set_status("pulling update…")
+            self.root.update_idletasks()
+
+            def _do_pull() -> None:
+                ok, msg = umi_version.pull(self._repo_dir)
+                self.root.after(0, lambda: self._finish_pull(ok, msg))
+
+            threading.Thread(target=_do_pull, daemon=True).start()
         else:
             if messagebox.askyesno(
                 "Update available",
@@ -1275,6 +1274,20 @@ class Studio:
                 import webbrowser
                 webbrowser.open(umi_version.REPO_URL)
             self._set_status(f"newer version available ({new_s}).")
+
+    def _finish_pull(self, ok: bool, msg: str) -> None:
+        if not ok:
+            messagebox.showerror("Update", msg)
+            self._set_status("update failed.")
+            return
+        if "already up to date" in msg.lower():
+            messagebox.showinfo("Update", "Already up to date.")
+            self._set_status("up to date.")
+            return
+        import sys as _sys
+        messagebox.showinfo("Updated", f"{msg}\n\nRelaunching now…")
+        self.root.destroy()
+        os.execv(_sys.executable, [_sys.executable, os.path.abspath(__file__)])
 
     # ---- dataset tab ------------------------------------------------------
 
