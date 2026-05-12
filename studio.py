@@ -114,9 +114,9 @@ class HoldJog:
     interval before treating a key as truly released.
     """
 
-    accel: float = 1500.0       # ticks / s^2
-    max_v: float = 1200.0       # ticks / s
-    decay: float = 4000.0       # ticks / s^2 toward zero on release
+    accel: float = 3000.0       # ticks / s^2
+    max_v: float = 2400.0       # ticks / s
+    decay: float = 8000.0       # ticks / s^2 toward zero on release
     autorepeat_grace_s: float = 0.06
 
     velocity: float = 0.0
@@ -343,7 +343,8 @@ class Studio:
         style.map("TNotebook.Tab",
                   background=[("selected", PANEL)],
                   foreground=[("selected", INK)])
-        style.configure("Horizontal.TScale", background=PANEL, troughcolor=BG)
+        style.configure("Horizontal.TScale", background=PANEL, troughcolor=BG,
+                        sliderlength=32, sliderthickness=22)
 
     # ---- layout -----------------------------------------------------------
 
@@ -522,6 +523,15 @@ class Studio:
             style="PanelDim.TLabel",
             wraplength=340,
         ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self.overload_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f, text="Overload protection",
+            variable=self.overload_var, command=self._on_overload,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(f, text="Reboot servos", command=self._do_reboot).grid(
+            row=5, column=2, columnspan=2, sticky="ew", pady=(8, 0), padx=(4, 0),
+        )
         for c in range(4):
             f.columnconfigure(c, weight=1)
 
@@ -616,16 +626,7 @@ class Studio:
             f.columnconfigure(c, weight=1)
 
     def _build_failsafe(self, parent: ttk.Frame) -> None:
-        f = ttk.LabelFrame(parent, text="Failsafe", padding=10)
-        f.pack(fill="x")
-        self.overload_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            f, text="Overload protection",
-            variable=self.overload_var, command=self._on_overload,
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Button(f, text="Reboot servos", command=self._do_reboot).grid(
-            row=1, column=0, sticky="w", pady=(6, 0),
-        )
+        pass  # overload + reboot moved into _build_control
 
     def _build_servo_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, style="TFrame")
