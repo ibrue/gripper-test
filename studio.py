@@ -541,7 +541,7 @@ class Studio:
             wraplength=340,
         ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-        self.overload_var = tk.BooleanVar(value=True)
+        self.overload_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             f, text="Overload protection",
             variable=self.overload_var, command=self._on_overload,
@@ -844,6 +844,7 @@ class Studio:
             )
             g.connect()
             g.set_offset(0)
+            g.set_overload_protection(self.overload_var.get())
         except Exception as e:
             messagebox.showerror("Connect", str(e))
             return
@@ -928,13 +929,6 @@ class Studio:
         if self.gripper is None:
             return
         enabled = self.overload_var.get()
-        if not enabled and not messagebox.askokcancel(
-            "Disable overload protection?",
-            "Servos will no longer auto-shutdown on hard grips. Watch the\n"
-            "live temperature — back off above ~70 °C.",
-        ):
-            self.overload_var.set(True)
-            return
         try:
             self.gripper.set_overload_protection(enabled)
         except Exception as e:
