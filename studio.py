@@ -251,9 +251,10 @@ class TimeSeries:
 
     def push(self, t: float, **named_values: float) -> None:
         self.t.append(t)
+        n_prev = len(self.t) - 1  # timestamps before this one
         for k, v in named_values.items():
             if k not in self.values:
-                self.values[k] = deque([float("nan")] * len(self.t), maxlen=self.maxlen)
+                self.values[k] = deque([float("nan")] * n_prev, maxlen=self.maxlen)
             self.values[k].append(v)
 
     def array(self, key: str) -> np.ndarray:
@@ -784,25 +785,6 @@ class Studio:
             anchor="e",
         )
         self._refresh_dataset()
-
-    def _build_trajectory_tab(self, nb: ttk.Notebook) -> None:
-        tab = ttk.Frame(nb, style="TFrame")
-        nb.add(tab, text="  Trajectory  ")
-        self.fig_traj = Figure(figsize=(7.4, 7.4), dpi=100, facecolor=BG)
-        self.ax_traj = self.fig_traj.add_subplot(111, projection="3d")
-        self.ax_traj.set_facecolor(PANEL)
-        self.ax_traj.tick_params(colors=DIM)
-        self.ax_traj.set_xlabel("x", color=DIM)
-        self.ax_traj.set_ylabel("y", color=DIM)
-        self.ax_traj.set_zlabel("z", color=DIM)
-        self.ax_traj.set_title("camera trajectory  (monocular — relative scale)",
-                               color=DIM, fontsize=10, loc="left")
-        for axis in (self.ax_traj.xaxis, self.ax_traj.yaxis, self.ax_traj.zaxis):
-            axis.set_pane_color((0.11, 0.12, 0.15, 1.0))
-        self.line_traj, = self.ax_traj.plot([0], [0], [0], color=ACCENT, linewidth=1.4)
-        self.scatter_curr = self.ax_traj.scatter([0], [0], [0], color=WARN, s=20)
-        self.canvas_traj = FigureCanvasTkAgg(self.fig_traj, master=tab)
-        self.canvas_traj.get_tk_widget().pack(fill="both", expand=True)
 
     # ---- key bindings -----------------------------------------------------
 
@@ -1525,38 +1507,42 @@ class Studio:
         )
 
     def _redraw_plots(self) -> None:
-        t = self.series.t_array()
-        if len(t) > 1:
-            t0 = t[0]
-            xs = t - t0
-            self.line_pos_a.set_data(xs, self.series.array("pos_a"))
-            self.line_pos_b.set_data(xs, self.series.array("pos_b"))
-            self.line_off.set_data(xs, self.series.array("offset"))
-            self.line_cur_a.set_data(xs, self.series.array("cur_a"))
-            self.line_cur_b.set_data(xs, self.series.array("cur_b"))
-            self.line_tmp_a.set_data(xs, self.series.array("tmp_a"))
-            self.line_tmp_b.set_data(xs, self.series.array("tmp_b"))
-            for ax in (self.ax_pos, self.ax_cur, self.ax_tmp):
-                ax.relim()
-                ax.autoscale_view()
-            self.canvas_servo.draw_idle()
+        try:
+            t = self.series.t_array()
+            if len(t) > 1:
+                t0 = t[0]
+                xs = t - t0
+                n = len(xs)
+                self.line_pos_a.set_data(xs, self.series.array("pos_a")[:n])
+                self.line_pos_b.set_data(xs, self.series.array("pos_b")[:n])
+                self.line_off.set_data(xs, self.series.array("offset")[:n])
+                self.line_cur_a.set_data(xs, self.series.array("cur_a")[:n])
+                self.line_cur_b.set_data(xs, self.series.array("cur_b")[:n])
+                self.line_tmp_a.set_data(xs, self.series.array("tmp_a")[:n])
+                self.line_tmp_b.set_data(xs, self.series.array("tmp_b")[:n])
+                for ax in (self.ax_pos, self.ax_cur, self.ax_tmp):
+                    ax.relim()
+                    ax.autoscale_view()
+                self.canvas_servo.draw_idle()
 
-        if self.camera is not None:
-            traj = self.camera.backend.trajectory_xyz()
-            if len(traj) > 1:
-                self.line_traj.set_data_3d(traj[:, 0], traj[:, 1], traj[:, 2])
-                self.scatter_curr._offsets3d = (
-                    traj[-1:, 0], traj[-1:, 1], traj[-1:, 2],
-                )
-                lo = traj.min(axis=0)
-                hi = traj.max(axis=0)
-                pad = max(0.2, float((hi - lo).max()) * 0.1)
-                self.ax_traj.set_xlim(lo[0] - pad, hi[0] + pad)
-                self.ax_traj.set_ylim(lo[1] - pad, hi[1] + pad)
-                self.ax_traj.set_zlim(lo[2] - pad, hi[2] + pad)
-                self.canvas_traj.draw_idle()
-
-        self.root.after(self.PLOT_MS, self._redraw_plots)
+            if self.camera is not None:
+                traj = self.camera.backend.trajectory_xyz()
+                if len(traj) > 1:
+                    self.line_traj.set_data_3d(traj[:, 0], traj[:, 1], traj[:, 2])
+                    self.scatter_curr._offsets3d = (
+                        traj[-1:, 0], traj[-1:, 1], traj[-1:, 2],
+                    )
+                    lo = traj.min(axis=0)
+                    hi = traj.max(axis=0)
+                    pad = max(0.2, float((hi - lo).max()) * 0.1)
+                    self.ax_traj.set_xlim(lo[0] - pad, hi[0] + pad)
+                    self.ax_traj.set_ylim(lo[1] - pad, hi[1] + pad)
+                    self.ax_traj.set_zlim(lo[2] - pad, hi[2] + pad)
+                    self.canvas_traj.draw_idle()
+        except Exception:
+            pass
+        finally:
+            self.root.after(self.PLOT_MS, self._redraw_plots)
 
     def _redraw_camera(self) -> None:
         if (self.camera is not None and Image is not None
