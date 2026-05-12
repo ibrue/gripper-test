@@ -24,7 +24,7 @@ from typing import Optional
 
 REPO_OWNER = "ibrue"
 REPO_NAME = "gripper-test"
-REPO_BRANCH = "claude/dynamixel-gripper-control-aprk8"
+REPO_BRANCH = "main"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 API_LATEST_COMMIT = (
     f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits/{REPO_BRANCH}"
@@ -98,12 +98,18 @@ def latest_remote_commit(timeout: float = 5.0) -> Optional[str]:
 
 
 def pull(repo_dir: str) -> tuple[bool, str]:
-    """``git pull --ff-only`` in repo_dir. (False, msg) on failure."""
+    """``git pull --ff-only`` from main, then update pip deps. (False, msg) on failure."""
     if not is_dev_checkout(repo_dir):
         return False, "not a git checkout (this is an .app bundle — rebuild instead)"
     try:
         res = subprocess.run(
-            ["git", "-C", repo_dir, "pull", "--ff-only"],
+            ["git", "-C", repo_dir, "fetch", "origin", REPO_BRANCH],
+            capture_output=True, text=True, timeout=60,
+        )
+        if res.returncode != 0:
+            return False, (res.stderr or res.stdout or "git fetch failed").strip()
+        res = subprocess.run(
+            ["git", "-C", repo_dir, "merge", "--ff-only", f"origin/{REPO_BRANCH}"],
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
@@ -113,6 +119,22 @@ def pull(repo_dir: str) -> tuple[bool, str]:
     if res.returncode != 0:
         return False, (res.stderr or res.stdout or "git failed").strip()
     out = (res.stdout or "").strip()
-    if not out or "Already up to date" in out:
+    already_current = not out or "Already up to date" in out
+    # Update pip dependencies using the venv pip if available, else sys pip.
+    import sys as _sys
+    venv_pip = os.path.join(repo_dir, ".venv", "bin", "pip")
+    pip_exe = venv_pip if os.path.exists(venv_pip) else _sys.executable
+    req = os.path.join(repo_dir, "requirements.txt")
+    if os.path.exists(req):
+        try:
+            subprocess.run(
+                [pip_exe, "install", "-r", req, "-q", "--disable-pip-version-check"]
+                if pip_exe == venv_pip else
+                [pip_exe, "-m", "pip", "install", "-r", req, "-q", "--disable-pip-version-check"],
+                timeout=120, capture_output=True,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    if already_current:
         return True, "already up to date"
     return True, out
